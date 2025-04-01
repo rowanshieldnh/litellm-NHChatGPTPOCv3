@@ -182,9 +182,7 @@ def init_redis_cluster(redis_kwargs) -> redis.RedisCluster:
                 "REDIS_CLUSTER_NODES environment variable is not valid JSON. Please ensure it's properly formatted."
             )
 
-    verbose_logger.debug(
-        "init_redis_cluster: startup nodes are being initialized."
-    )
+    verbose_logger.debug("init_redis_cluster: startup nodes are being initialized.")
     from redis.cluster import ClusterNode
 
     args = _get_redis_cluster_kwargs()
@@ -204,6 +202,7 @@ def init_redis_cluster(redis_kwargs) -> redis.RedisCluster:
 
 def _init_redis_sentinel(redis_kwargs) -> redis.Redis:
     sentinel_nodes = redis_kwargs.get("sentinel_nodes")
+    sentinel_password = redis_kwargs.get("sentinel_password")
     service_name = redis_kwargs.get("service_name")
 
     if not sentinel_nodes or not service_name:
@@ -214,7 +213,11 @@ def _init_redis_sentinel(redis_kwargs) -> redis.Redis:
     verbose_logger.debug("init_redis_sentinel: sentinel nodes are being initialized.")
 
     # Set up the Sentinel client
-    sentinel = redis.Sentinel(sentinel_nodes, socket_timeout=0.1)
+    sentinel = redis.Sentinel(
+        sentinel_nodes,
+        socket_timeout=0.1,
+        password=sentinel_password,
+    )
 
     # Return the master instance for the given service
 
@@ -307,7 +310,6 @@ def get_redis_async_client(
         return _init_async_redis_sentinel(redis_kwargs)
 
     return async_redis.Redis(
-        socket_timeout=5,
         **redis_kwargs,
     )
 

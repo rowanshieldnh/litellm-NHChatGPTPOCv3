@@ -62,10 +62,18 @@ def _get_metadata_variable_name(request: Request) -> str:
     """
     if RouteChecks._is_assistants_api_request(request):
         return "litellm_metadata"
-    if "batches" in request.url.path:
-        return "litellm_metadata"
-    if "/v1/messages" in request.url.path:
-        # anthropic API has a field called metadata
+
+    LITELLM_METADATA_ROUTES = [
+        "batches",
+        "/v1/messages",
+        "responses",
+    ]
+    if any(
+        [
+            litellm_metadata_route in request.url.path
+            for litellm_metadata_route in LITELLM_METADATA_ROUTES
+        ]
+    ):
         return "litellm_metadata"
     else:
         return "metadata"
@@ -338,11 +346,11 @@ class LiteLLMProxyRequestSetup:
 
         ## KEY-LEVEL SPEND LOGS / TAGS
         if "tags" in key_metadata and key_metadata["tags"] is not None:
-            data[_metadata_variable_name]["tags"] = (
-                LiteLLMProxyRequestSetup._merge_tags(
-                    request_tags=data[_metadata_variable_name].get("tags"),
-                    tags_to_add=key_metadata["tags"],
-                )
+            data[_metadata_variable_name][
+                "tags"
+            ] = LiteLLMProxyRequestSetup._merge_tags(
+                request_tags=data[_metadata_variable_name].get("tags"),
+                tags_to_add=key_metadata["tags"],
             )
         if "spend_logs_metadata" in key_metadata and isinstance(
             key_metadata["spend_logs_metadata"], dict
@@ -548,9 +556,9 @@ async def add_litellm_data_to_request(  # noqa: PLR0915
     data[_metadata_variable_name]["litellm_api_version"] = version
 
     if general_settings is not None:
-        data[_metadata_variable_name]["global_max_parallel_requests"] = (
-            general_settings.get("global_max_parallel_requests", None)
-        )
+        data[_metadata_variable_name][
+            "global_max_parallel_requests"
+        ] = general_settings.get("global_max_parallel_requests", None)
 
     ### KEY-LEVEL Controls
     key_metadata = user_api_key_dict.metadata

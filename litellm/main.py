@@ -25,6 +25,7 @@ from functools import partial
 from typing import (
     Any,
     Callable,
+    Coroutine,
     Dict,
     List,
     Literal,
@@ -74,6 +75,7 @@ from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from litellm.realtime_api.main import _realtime_health_check
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.router import GenericLiteLLMParams
+from litellm.types.utils import RawRequestTypedDict
 from litellm.utils import (
     CustomStreamWrapper,
     ProviderConfigManager,
@@ -944,14 +946,16 @@ def completion(  # type: ignore # noqa: PLR0915
     ## PROMPT MANAGEMENT HOOKS ##
 
     if isinstance(litellm_logging_obj, LiteLLMLoggingObj) and prompt_id is not None:
-        model, messages, optional_params = (
-            litellm_logging_obj.get_chat_completion_prompt(
-                model=model,
-                messages=messages,
-                non_default_params=non_default_params,
-                prompt_id=prompt_id,
-                prompt_variables=prompt_variables,
-            )
+        (
+            model,
+            messages,
+            optional_params,
+        ) = litellm_logging_obj.get_chat_completion_prompt(
+            model=model,
+            messages=messages,
+            non_default_params=non_default_params,
+            prompt_id=prompt_id,
+            prompt_variables=prompt_variables,
         )
 
     try:
@@ -1162,6 +1166,7 @@ def completion(  # type: ignore # noqa: PLR0915
             merge_reasoning_content_in_choices=kwargs.get(
                 "merge_reasoning_content_in_choices", None
             ),
+            api_version=api_version,
             azure_ad_token=kwargs.get("azure_ad_token"),
             tenant_id=kwargs.get("tenant_id"),
             client_id=kwargs.get("client_id"),
@@ -1243,7 +1248,6 @@ def completion(  # type: ignore # noqa: PLR0915
                 optional_params["max_retries"] = max_retries
 
             if litellm.AzureOpenAIO1Config().is_o_series_model(model=model):
-
                 ## LOAD CONFIG - if set
                 config = litellm.AzureOpenAIO1Config.get_config()
                 for k, v in config.items():
@@ -2243,7 +2247,12 @@ def completion(  # type: ignore # noqa: PLR0915
                     additional_args={"headers": headers},
                 )
         elif custom_llm_provider == "openrouter":
-            api_base = api_base or litellm.api_base or "https://openrouter.ai/api/v1"
+            api_base = (
+                api_base
+                or litellm.api_base
+                or get_secret_str("OPENROUTER_API_BASE")
+                or "https://openrouter.ai/api/v1"
+            )
 
             api_key = (
                 api_key
@@ -2342,6 +2351,8 @@ def completion(  # type: ignore # noqa: PLR0915
                 or litellm.api_key
             )
 
+            api_base = api_base or litellm.api_base or get_secret("GEMINI_API_BASE")
+
             new_params = deepcopy(optional_params)
             response = vertex_chat_completion.completion(  # type: ignore
                 model=model,
@@ -2383,6 +2394,8 @@ def completion(  # type: ignore # noqa: PLR0915
                 or optional_params.pop("vertex_ai_credentials", None)
                 or get_secret("VERTEXAI_CREDENTIALS")
             )
+
+            api_base = api_base or litellm.api_base or get_secret("VERTEXAI_API_BASE")
 
             new_params = deepcopy(optional_params)
             if (
@@ -2596,6 +2609,7 @@ def completion(  # type: ignore # noqa: PLR0915
                 encoding=encoding,
                 logging_obj=logging,
                 acompletion=acompletion,
+                client=client,
             )
 
             ## RESPONSE OBJECT
@@ -2641,9 +2655,9 @@ def completion(  # type: ignore # noqa: PLR0915
                     "aws_region_name" not in optional_params
                     or optional_params["aws_region_name"] is None
                 ):
-                    optional_params["aws_region_name"] = (
-                        aws_bedrock_client.meta.region_name
-                    )
+                    optional_params[
+                        "aws_region_name"
+                    ] = aws_bedrock_client.meta.region_name
 
             bedrock_route = BedrockModelInfo.get_bedrock_route(model)
             if bedrock_route == "converse":
@@ -2985,6 +2999,39 @@ def completion(  # type: ignore # noqa: PLR0915
                 )
                 return response
             response = model_response
+        elif custom_llm_provider == "snowflake" or model in litellm.snowflake_models:
+            try:
+                client = (
+                    HTTPHandler(timeout=timeout) if stream is False else None
+                )  # Keep this here, otherwise, the httpx.client closes and streaming is impossible
+                response = base_llm_http_handler.completion(
+                    model=model,
+                    messages=messages,
+                    headers=headers,
+                    model_response=model_response,
+                    api_key=api_key,
+                    api_base=api_base,
+                    acompletion=acompletion,
+                    logging_obj=logging,
+                    optional_params=optional_params,
+                    litellm_params=litellm_params,
+                    timeout=timeout,  # type: ignore
+                    client=client,
+                    custom_llm_provider=custom_llm_provider,
+                    encoding=encoding,
+                    stream=stream,
+                )
+
+            except Exception as e:
+                ## LOGGING - log the original exception returned
+                logging.post_call(
+                    input=messages,
+                    api_key=api_key,
+                    original_response=str(e),
+                    additional_args={"headers": headers},
+                )
+                raise e
+
         elif custom_llm_provider == "custom":
             url = litellm.api_base or api_base or ""
             if url is None or url == "":
@@ -3043,6 +3090,7 @@ def completion(  # type: ignore # noqa: PLR0915
             model_response.created = int(time.time())
             model_response.model = model
             response = model_response
+
         elif (
             custom_llm_provider in litellm._custom_providers
         ):  # Assume custom LLM provider
@@ -3252,7 +3300,7 @@ def embedding(  # noqa: PLR0915
     litellm_call_id=None,
     logger_fn=None,
     **kwargs,
-) -> EmbeddingResponse:
+) -> Union[EmbeddingResponse, Coroutine[Any, Any, EmbeddingResponse]]:
     """
     Embedding function that calls an API to generate embeddings for the given input.
 
@@ -3373,7 +3421,9 @@ def embedding(  # noqa: PLR0915
     if mock_response is not None:
         return mock_embedding(model=model, mock_response=mock_response)
     try:
-        response: Optional[EmbeddingResponse] = None
+        response: Optional[
+            Union[EmbeddingResponse, Coroutine[Any, Any, EmbeddingResponse]]
+        ] = None
 
         if azure is True or custom_llm_provider == "azure":
             # azure configs
@@ -3612,6 +3662,8 @@ def embedding(  # noqa: PLR0915
                 api_key or get_secret_str("GEMINI_API_KEY") or litellm.api_key
             )
 
+            api_base = api_base or litellm.api_base or get_secret_str("GEMINI_API_BASE")
+
             response = google_batch_embeddings.batch_embeddings(  # type: ignore
                 model=model,
                 input=input,
@@ -3626,6 +3678,8 @@ def embedding(  # noqa: PLR0915
                 print_verbose=print_verbose,
                 custom_llm_provider="gemini",
                 api_key=gemini_api_key,
+                api_base=api_base,
+                client=client,
             )
 
         elif custom_llm_provider == "vertex_ai":
@@ -3650,6 +3704,13 @@ def embedding(  # noqa: PLR0915
                 or get_secret_str("VERTEX_CREDENTIALS")
             )
 
+            api_base = (
+                api_base
+                or litellm.api_base
+                or get_secret_str("VERTEXAI_API_BASE")
+                or get_secret_str("VERTEX_API_BASE")
+            )
+
             if (
                 "image" in optional_params
                 or "video" in optional_params
@@ -3663,6 +3724,7 @@ def embedding(  # noqa: PLR0915
                     encoding=encoding,
                     logging_obj=logging,
                     optional_params=optional_params,
+                    litellm_params=litellm_params_dict,
                     model_response=EmbeddingResponse(),
                     vertex_project=vertex_ai_project,
                     vertex_location=vertex_ai_location,
@@ -3670,6 +3732,8 @@ def embedding(  # noqa: PLR0915
                     aembedding=aembedding,
                     print_verbose=print_verbose,
                     custom_llm_provider="vertex_ai",
+                    client=client,
+                    api_base=api_base,
                 )
             else:
                 response = vertex_embedding.embedding(
@@ -3687,6 +3751,8 @@ def embedding(  # noqa: PLR0915
                     aembedding=aembedding,
                     print_verbose=print_verbose,
                     api_key=api_key,
+                    api_base=api_base,
+                    client=client,
                 )
         elif custom_llm_provider == "oobabooga":
             response = oobabooga.embedding(
@@ -3865,7 +3931,11 @@ def embedding(  # noqa: PLR0915
             raise LiteLLMUnknownProvider(
                 model=model, custom_llm_provider=custom_llm_provider
             )
-        if response is not None and hasattr(response, "_hidden_params"):
+        if (
+            response is not None
+            and hasattr(response, "_hidden_params")
+            and isinstance(response, EmbeddingResponse)
+        ):
             response._hidden_params["custom_llm_provider"] = custom_llm_provider
 
         if response is None:
@@ -4293,9 +4363,9 @@ def adapter_completion(
     new_kwargs = translation_obj.translate_completion_input_params(kwargs=kwargs)
 
     response: Union[ModelResponse, CustomStreamWrapper] = completion(**new_kwargs)  # type: ignore
-    translated_response: Optional[Union[BaseModel, AdapterCompletionStreamWrapper]] = (
-        None
-    )
+    translated_response: Optional[
+        Union[BaseModel, AdapterCompletionStreamWrapper]
+    ] = None
     if isinstance(response, ModelResponse):
         translated_response = translation_obj.translate_completion_output_params(
             response=response
@@ -4367,13 +4437,16 @@ async def amoderation(
 
     optional_params = GenericLiteLLMParams(**kwargs)
     try:
-        model, _custom_llm_provider, _dynamic_api_key, _dynamic_api_base = (
-            litellm.get_llm_provider(
-                model=model or "",
-                custom_llm_provider=custom_llm_provider,
-                api_base=optional_params.api_base,
-                api_key=optional_params.api_key,
-            )
+        (
+            model,
+            _custom_llm_provider,
+            _dynamic_api_key,
+            _dynamic_api_base,
+        ) = litellm.get_llm_provider(
+            model=model or "",
+            custom_llm_provider=custom_llm_provider,
+            api_base=optional_params.api_base,
+            api_key=optional_params.api_key,
         )
     except litellm.BadRequestError:
         # `model` is optional field for moderation - get_llm_provider will throw BadRequestError if model is not set / not recognized
@@ -4645,6 +4718,14 @@ def image_generation(  # noqa: PLR0915
                 or optional_params.pop("vertex_ai_credentials", None)
                 or get_secret_str("VERTEXAI_CREDENTIALS")
             )
+
+            api_base = (
+                api_base
+                or litellm.api_base
+                or get_secret_str("VERTEXAI_API_BASE")
+                or get_secret_str("VERTEX_API_BASE")
+            )
+
             model_response = vertex_image_generation.image_generation(
                 model=model,
                 prompt=prompt,
@@ -4656,6 +4737,8 @@ def image_generation(  # noqa: PLR0915
                 vertex_location=vertex_ai_location,
                 vertex_credentials=vertex_credentials,
                 aimg_generation=aimg_generation,
+                api_base=api_base,
+                client=client,
             )
         elif (
             custom_llm_provider in litellm._custom_providers
@@ -4908,6 +4991,10 @@ async def atranscription(*args, **kwargs) -> TranscriptionResponse:
         else:
             # Call the synchronous function using run_in_executor
             response = await loop.run_in_executor(None, func_with_context)
+        if not isinstance(response, TranscriptionResponse):
+            raise ValueError(
+                f"Invalid response from transcription provider, expected TranscriptionResponse, but got {type(response)}"
+            )
         return response
     except Exception as e:
         custom_llm_provider = custom_llm_provider or "openai"
@@ -4941,7 +5028,7 @@ def transcription(
     max_retries: Optional[int] = None,
     custom_llm_provider=None,
     **kwargs,
-) -> TranscriptionResponse:
+) -> Union[TranscriptionResponse, Coroutine[Any, Any, TranscriptionResponse]]:
     """
     Calls openai + azure whisper endpoints.
 
@@ -5010,7 +5097,15 @@ def transcription(
         custom_llm_provider=custom_llm_provider,
     )
 
-    response: Optional[TranscriptionResponse] = None
+    response: Optional[
+        Union[TranscriptionResponse, Coroutine[Any, Any, TranscriptionResponse]]
+    ] = None
+
+    provider_config = ProviderConfigManager.get_provider_audio_transcription_config(
+        model=model,
+        provider=LlmProviders(custom_llm_provider),
+    )
+
     if custom_llm_provider == "azure":
         # azure configs
         api_base = api_base or litellm.api_base or get_secret_str("AZURE_API_BASE")
@@ -5077,12 +5172,15 @@ def transcription(
             max_retries=max_retries,
             api_base=api_base,
             api_key=api_key,
+            provider_config=provider_config,
+            litellm_params=litellm_params_dict,
         )
     elif custom_llm_provider == "deepgram":
         response = base_llm_http_handler.audio_transcriptions(
             model=model,
             audio_file=file,
             optional_params=optional_params,
+            litellm_params=litellm_params_dict,
             model_response=model_response,
             atranscription=atranscription,
             client=(
@@ -5101,6 +5199,7 @@ def transcription(
             api_key=api_key,
             custom_llm_provider="deepgram",
             headers={},
+            provider_config=provider_config,
         )
     if response is None:
         raise ValueError("Unmapped provider passed in. Unable to get the response.")
@@ -5310,7 +5409,6 @@ def speech(  # noqa: PLR0915
             litellm_params=litellm_params_dict,
         )
     elif custom_llm_provider == "vertex_ai" or custom_llm_provider == "vertex_ai_beta":
-
         generic_optional_params = GenericLiteLLMParams(**kwargs)
 
         api_base = generic_optional_params.api_base or ""
@@ -5365,7 +5463,6 @@ def speech(  # noqa: PLR0915
 async def ahealth_check_wildcard_models(
     model: str, custom_llm_provider: str, model_params: dict
 ) -> dict:
-
     # this is a wildcard model, we need to pick a random model from the provider
     cheapest_models = pick_cheapest_chat_models_from_llm_provider(
         custom_llm_provider=custom_llm_provider, n=3
@@ -5415,6 +5512,17 @@ async def ahealth_check(
             "x-ms-region": str,
         }
     """
+    # Map modes to their corresponding health check calls
+    litellm_logging_obj = Logging(
+        model="",
+        messages=[],
+        stream=False,
+        call_type="acompletion",
+        litellm_call_id="1234",
+        start_time=datetime.datetime.now(),
+        function_id="1234",
+        log_raw_request_response=True,
+    )
     try:
         model: Optional[str] = model_params.get("model", None)
         if model is None:
@@ -5437,9 +5545,12 @@ async def ahealth_check(
                 custom_llm_provider=custom_llm_provider,
                 model_params=model_params,
             )
-        # Map modes to their corresponding health check calls
+        model_params["litellm_logging_obj"] = litellm_logging_obj
+
         mode_handlers = {
-            "chat": lambda: litellm.acompletion(**model_params),
+            "chat": lambda: litellm.acompletion(
+                **model_params,
+            ),
             "completion": lambda: litellm.atext_completion(
                 **_filter_model_params(model_params),
                 prompt=prompt or "test",
@@ -5496,13 +5607,16 @@ async def ahealth_check(
                 "error": f"error:{str(e)}. Missing `mode`. Set the `mode` for the model - https://docs.litellm.ai/docs/proxy/health#embedding-models  \nstacktrace: {stack_trace}"
             }
 
-        error_to_return = (
-            str(e)
-            + "\nHave you set 'mode' - https://docs.litellm.ai/docs/proxy/health#embedding-models"
-            + "\nstack trace: "
-            + stack_trace
+        error_to_return = str(e) + "\nstack trace: " + stack_trace
+
+        raw_request_typed_dict = litellm_logging_obj.model_call_details.get(
+            "raw_request_typed_dict"
         )
-        return {"error": error_to_return}
+
+        return {
+            "error": error_to_return,
+            "raw_request_typed_dict": raw_request_typed_dict,
+        }
 
 
 ####### HELPER FUNCTIONS ################
@@ -5671,9 +5785,9 @@ def stream_chunk_builder(  # noqa: PLR0915
         ]
 
         if len(content_chunks) > 0:
-            response["choices"][0]["message"]["content"] = (
-                processor.get_combined_content(content_chunks)
-            )
+            response["choices"][0]["message"][
+                "content"
+            ] = processor.get_combined_content(content_chunks)
 
         audio_chunks = [
             chunk

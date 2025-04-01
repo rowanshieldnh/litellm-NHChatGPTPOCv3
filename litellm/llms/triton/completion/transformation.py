@@ -72,6 +72,7 @@ class TritonConfig(BaseConfig):
         api_base: Optional[str],
         model: str,
         optional_params: dict,
+        litellm_params: dict,
         stream: Optional[bool] = None,
     ) -> str:
         if api_base is None:
@@ -243,7 +244,6 @@ class TritonInferConfig(TritonConfig):
         litellm_params: dict,
         headers: dict,
     ) -> dict:
-
         text_input = messages[0].get("content", "")
         data_for_triton = {
             "inputs": [
