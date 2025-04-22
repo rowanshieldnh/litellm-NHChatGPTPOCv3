@@ -1546,7 +1546,7 @@ def test_call_with_key_over_budget(prisma_client):
             )
             await proxy_db_logger._PROXY_track_cost_callback(
                 kwargs={
-                    "model": "chatgpt-v-2",
+                    "model": "chatgpt-v-3",
                     "stream": False,
                     "litellm_params": {
                         "metadata": {
@@ -1578,10 +1578,10 @@ def test_call_with_key_over_budget(prisma_client):
 
             assert spend_log.request_id == request_id
             assert spend_log.spend == float("2e-05")
-            assert spend_log.model == "chatgpt-v-2"
+            assert spend_log.model == "chatgpt-v-3"
             assert (
                 spend_log.cache_key
-                == "c891d64397a472e6deb31b87a5ac4d3ed5b2dcc069bc87e2afe91e6d64e95a1e"
+                == "509ba0554a7129ae4f4fd13d11c141acce5549bb6aaf1f629ed543101615658e"
             )
 
             # use generated key to auth in
@@ -1669,7 +1669,7 @@ def test_call_with_key_over_budget_no_cache(prisma_client):
             proxy_db_logger = _ProxyDBLogger()
             await proxy_db_logger._PROXY_track_cost_callback(
                 kwargs={
-                    "model": "chatgpt-v-2",
+                    "model": "chatgpt-v-3",
                     "stream": False,
                     "litellm_params": {
                         "metadata": {
@@ -1702,10 +1702,10 @@ def test_call_with_key_over_budget_no_cache(prisma_client):
 
             assert spend_log.request_id == request_id
             assert spend_log.spend == float("2e-05")
-            assert spend_log.model == "chatgpt-v-2"
+            assert spend_log.model == "chatgpt-v-3"
             assert (
                 spend_log.cache_key
-                == "c891d64397a472e6deb31b87a5ac4d3ed5b2dcc069bc87e2afe91e6d64e95a1e"
+                == "509ba0554a7129ae4f4fd13d11c141acce5549bb6aaf1f629ed543101615658e"
             )
 
             # use generated key to auth in
@@ -1757,7 +1757,7 @@ async def test_call_with_key_over_model_budget(
 
     try:
 
-        # set budget for chatgpt-v-2 to 0.000001, expect the next request to fail
+        # set budget for chatgpt-v-3 to 0.000001, expect the next request to fail
         model_max_budget = {
             "gpt-4o-mini": {
                 "budget_limit": "0.000001",
@@ -1898,7 +1898,7 @@ async def test_call_with_key_never_over_budget(prisma_client):
         )
         await proxy_db_logger._PROXY_track_cost_callback(
             kwargs={
-                "model": "chatgpt-v-2",
+                "model": "chatgpt-v-3",
                 "stream": False,
                 "litellm_params": {
                     "metadata": {
@@ -1987,7 +1987,7 @@ async def test_call_with_key_over_budget_stream(prisma_client):
         await proxy_db_logger._PROXY_track_cost_callback(
             kwargs={
                 "call_type": "acompletion",
-                "model": "sagemaker-chatgpt-v-2",
+                "model": "sagemaker-chatgpt-v-3",
                 "stream": True,
                 "complete_streaming_response": resp,
                 "litellm_params": {
@@ -2280,15 +2280,16 @@ def test_get_bearer_token():
     result = _get_bearer_token(api_key)
     assert result == "sk-1234", f"Expected 'valid_token', got '{result}'"
 
-
-def test_update_logs_with_spend_logs_url(prisma_client):
+@pytest.mark.asyncio
+async def test_update_logs_with_spend_logs_url(prisma_client):
     """
     Unit test for making sure spend logs list is still updated when url passed in
     """
     from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter
+    db_spend_update_writer = DBSpendUpdateWriter()
 
     payload = {"startTime": datetime.now(), "endTime": datetime.now()}
-    DBSpendUpdateWriter._set_spend_logs_payload(payload=payload, prisma_client=prisma_client)
+    await db_spend_update_writer._insert_spend_log_to_db(payload=payload, prisma_client=prisma_client)
 
     assert len(prisma_client.spend_log_transactions) > 0
 
@@ -2296,7 +2297,7 @@ def test_update_logs_with_spend_logs_url(prisma_client):
 
     spend_logs_url = ""
     payload = {"startTime": datetime.now(), "endTime": datetime.now()}
-    DBSpendUpdateWriter._set_spend_logs_payload(
+    await db_spend_update_writer._insert_spend_log_to_db(
         payload=payload, spend_logs_url=spend_logs_url, prisma_client=prisma_client
     )
 
@@ -2430,7 +2431,7 @@ async def track_cost_callback_helper_fn(generated_key: str, user_id: str):
     await proxy_db_logger._PROXY_track_cost_callback(
         kwargs={
             "call_type": "acompletion",
-            "model": "sagemaker-chatgpt-v-2",
+            "model": "sagemaker-chatgpt-v-3",
             "stream": True,
             "complete_streaming_response": resp,
             "litellm_params": {

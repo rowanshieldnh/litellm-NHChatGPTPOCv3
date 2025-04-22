@@ -9,10 +9,12 @@ from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union
 import litellm
 from litellm._logging import verbose_logger
 from litellm.constants import RESPONSE_FORMAT_TOOL_NAME
+from litellm.types.llms.databricks import DatabricksTool
 from litellm.types.llms.openai import ChatCompletionThinkingBlock
 from litellm.types.utils import (
     ChatCompletionDeltaToolCall,
     ChatCompletionMessageToolCall,
+    ChatCompletionRedactedThinkingBlock,
     Choices,
     Delta,
     EmbeddingResponse,
@@ -33,6 +35,25 @@ from litellm.types.utils import (
 )
 
 from .get_headers import get_response_headers
+
+
+def convert_tool_call_to_json_mode(
+    tool_calls: List[ChatCompletionMessageToolCall],
+    convert_tool_call_to_json_mode: bool,
+) -> Tuple[Optional[Message], Optional[str]]:
+    if _should_convert_tool_call_to_json_mode(
+        tool_calls=tool_calls,
+        convert_tool_call_to_json_mode=convert_tool_call_to_json_mode,
+    ):
+        # to support 'json_schema' logic on older models
+        json_mode_content_str: Optional[str] = tool_calls[0]["function"].get(
+            "arguments"
+        )
+        if json_mode_content_str is not None:
+            message = litellm.Message(content=json_mode_content_str)
+            finish_reason = "stop"
+            return message, finish_reason
+    return None, None
 
 
 async def convert_to_streaming_response_async(response_object: Optional[dict] = None):
@@ -335,21 +356,14 @@ class LiteLLMResponseObjectHandler:
         Only supported for HF TGI models
         """
         transformed_logprobs: Optional[TextCompletionLogprobs] = None
-        if custom_llm_provider == "huggingface":
-            # only supported for TGI models
-            try:
-                raw_response = response._hidden_params.get("original_response", None)
-                transformed_logprobs = litellm.huggingface._transform_logprobs(
-                    hf_response=raw_response
-                )
-            except Exception as e:
-                verbose_logger.exception(f"LiteLLM non blocking exception: {e}")
 
         return transformed_logprobs
 
 
 def _should_convert_tool_call_to_json_mode(
-    tool_calls: Optional[List[ChatCompletionMessageToolCall]] = None,
+    tool_calls: Optional[
+        Union[List[ChatCompletionMessageToolCall], List[DatabricksTool]]
+    ] = None,
     convert_tool_call_to_json_mode: Optional[bool] = None,
 ) -> bool:
     """
@@ -473,7 +487,14 @@ def convert_to_model_response_object(  # noqa: PLR0915
                     )
 
                     # Handle thinking models that display `thinking_blocks` within `content`
-                    thinking_blocks: Optional[List[ChatCompletionThinkingBlock]] = None
+                    thinking_blocks: Optional[
+                        List[
+                            Union[
+                                ChatCompletionThinkingBlock,
+                                ChatCompletionRedactedThinkingBlock,
+                            ]
+                        ]
+                    ] = None
                     if "thinking_blocks" in choice["message"]:
                         thinking_blocks = choice["message"]["thinking_blocks"]
                         provider_specific_fields["thinking_blocks"] = thinking_blocks

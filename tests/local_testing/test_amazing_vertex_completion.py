@@ -59,6 +59,7 @@ VERTEX_MODELS_TO_NOT_TEST = [
     "gemini-pro-experimental",
     "gemini-flash-experimental",
     "gemini-1.5-flash-exp-0827",
+    "gemini-2.0-pro-exp-02-05",
     "gemini-pro-flash",
     "gemini-1.5-flash-exp-0827",
     "gemini-2.0-flash-exp",
@@ -452,6 +453,7 @@ async def test_async_vertexai_response():
             or "ultra" in model
             or "002" in model
             or "gemini-2.0-flash-thinking-exp" in model
+            or "gemini-2.0-pro-exp-02-05" in model
         ):
             # our account does not have access to this model
             continue
@@ -498,6 +500,7 @@ async def test_async_vertexai_streaming_response():
             or "ultra" in model
             or "002" in model
             or "gemini-2.0-flash-thinking-exp" in model
+            or "gemini-2.0-pro-exp-02-05" in model
         ):
             # our account does not have access to this model
             continue
@@ -938,9 +941,8 @@ from test_completion import response_format_tests
 @pytest.mark.parametrize(
     "model",
     [
-        "vertex_ai/mistral-large@2407",
+        "vertex_ai/mistral-large-2411",
         "vertex_ai/mistral-nemo@2407",
-        "vertex_ai/codestral@2405",
         # "vertex_ai/meta/llama3-405b-instruct-maas",
     ],  #
 )  # "vertex_ai",
@@ -1002,10 +1004,9 @@ async def test_partner_models_httpx(model, sync_mode):
 @pytest.mark.parametrize(
     "model",
     [
-        "vertex_ai/mistral-large@2407",
+        "vertex_ai/mistral-large-2411",
         # "vertex_ai/meta/llama3-405b-instruct-maas",
-        "vertex_ai/codestral@2405",
-    ],  #
+    ],
 )  # "vertex_ai",
 @pytest.mark.parametrize(
     "sync_mode",

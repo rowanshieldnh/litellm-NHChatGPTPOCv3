@@ -33,6 +33,7 @@ import TransformRequestPanel from "@/components/transform_request";
 import { fetchUserModels } from "@/components/create_key_button";
 import { fetchTeams } from "@/components/common_components/fetch_teams";
 import MCPToolsViewer from "@/components/mcp_tools";
+import TagManagement from "@/components/tag_management";
 
 function getCookie(name: string) {
   const cookieValue = document.cookie
@@ -97,8 +98,8 @@ export default function CreateKeyPage() {
   const searchParams = useSearchParams()!;
   const [modelData, setModelData] = useState<any>({ data: [] });
   const [token, setToken] = useState<string | null>(null);
+  const [userID, setUserID] = useState<string | null>(null);
 
-  const userID = searchParams.get("userID");
   const invitation_id = searchParams.get("invitation_id");
 
   // Get page from URL, default to 'api-keys' if not present
@@ -175,6 +176,10 @@ export default function CreateKeyPage() {
 
       if (decoded.auth_header_name) {
         setGlobalLitellmHeaderName(decoded.auth_header_name);
+      }
+
+      if (decoded.user_id) {
+        setUserID(decoded.user_id);
       }
     }
   }, [token]);
@@ -299,6 +304,7 @@ export default function CreateKeyPage() {
                   accessToken={accessToken}
                   showSSOBanner={showSSOBanner}
                   premiumUser={premiumUser}
+                  proxySettings={proxySettings}
                 />
               ) : page == "api_ref" ? (
                 <APIRef proxySettings={proxySettings} />
@@ -313,6 +319,8 @@ export default function CreateKeyPage() {
                 <BudgetPanel accessToken={accessToken} />
               ) : page == "guardrails" ? (
                 <GuardrailsPanel accessToken={accessToken} />
+              ): page == "transform-request" ? (
+                <TransformRequestPanel accessToken={accessToken} />
               ): page == "general-settings" ? (
                 <GeneralSettings
                   userID={userID}
@@ -355,11 +363,18 @@ export default function CreateKeyPage() {
                   userRole={userRole}
                   userID={userID}
                 />
+              ) : page == "tag-management" ? (
+                <TagManagement
+                  accessToken={accessToken}
+                  userRole={userRole}
+                  userID={userID}
+                />
               ) : page == "new_usage" ? (
                 <NewUsagePage
                   userID={userID}
                   userRole={userRole}
                   accessToken={accessToken}
+                  teams={teams as Team[] ?? []}
                 />
               ) : 
               (

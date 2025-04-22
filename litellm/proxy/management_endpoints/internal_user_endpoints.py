@@ -14,9 +14,8 @@ These are members of a Team on LiteLLM
 import asyncio
 import traceback
 import uuid
-from datetime import date, datetime, timedelta, timezone
-from enum import Enum
-from typing import Any, Dict, List, Optional, TypedDict, Union, cast
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Union, cast
 
 import fastapi
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -26,6 +25,8 @@ from litellm._logging import verbose_proxy_logger
 from litellm.litellm_core_utils.duration_parser import duration_in_seconds
 from litellm.proxy._types import *
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
+from litellm.proxy.management_endpoints.common_daily_activity import get_daily_activity
+from litellm.proxy.management_endpoints.common_utils import _user_has_admin_view
 from litellm.proxy.management_endpoints.key_management_endpoints import (
     generate_key_helper_fn,
     prepare_metadata_fields,
@@ -33,6 +34,15 @@ from litellm.proxy.management_endpoints.key_management_endpoints import (
 from litellm.proxy.management_helpers.audit_logs import create_audit_log_for_update
 from litellm.proxy.management_helpers.utils import management_endpoint_wrapper
 from litellm.proxy.utils import handle_exception_on_proxy
+from litellm.types.proxy.management_endpoints.common_daily_activity import (
+    BreakdownMetrics,
+    KeyMetadata,
+    KeyMetricWithMetadata,
+    LiteLLM_DailyUserSpend,
+    MetricWithMetadata,
+    SpendAnalyticsPaginatedResponse,
+    SpendMetrics,
+)
 
 router = APIRouter()
 
@@ -1244,112 +1254,67 @@ async def ui_view_users(
         raise HTTPException(status_code=500, detail=f"Error searching users: {str(e)}")
 
 
-class GroupByDimension(str, Enum):
-    DATE = "date"
-    MODEL = "model"
-    API_KEY = "api_key"
-    TEAM = "team"
-    ORGANIZATION = "organization"
-    MODEL_GROUP = "model_group"
-    PROVIDER = "custom_llm_provider"
-
-
-class SpendMetrics(BaseModel):
-    spend: float = Field(default=0.0)
-    prompt_tokens: int = Field(default=0)
-    completion_tokens: int = Field(default=0)
-    total_tokens: int = Field(default=0)
-    api_requests: int = Field(default=0)
-
-
-class BreakdownMetrics(BaseModel):
-    """Breakdown of spend by different dimensions"""
-
-    models: Dict[str, SpendMetrics] = Field(default_factory=dict)  # model -> metrics
-    providers: Dict[str, SpendMetrics] = Field(
-        default_factory=dict
-    )  # provider -> metrics
-    api_keys: Dict[str, SpendMetrics] = Field(
-        default_factory=dict
-    )  # api_key -> metrics
-
-
-class DailySpendData(BaseModel):
-    date: date
-    metrics: SpendMetrics
-    breakdown: BreakdownMetrics = Field(default_factory=BreakdownMetrics)
-
-
-class DailySpendMetadata(BaseModel):
-    total_spend: float = Field(default=0.0)
-    total_prompt_tokens: int = Field(default=0)
-    total_completion_tokens: int = Field(default=0)
-    total_api_requests: int = Field(default=0)
-    page: int = Field(default=1)
-    total_pages: int = Field(default=1)
-    has_more: bool = Field(default=False)
-
-
-class SpendAnalyticsPaginatedResponse(BaseModel):
-    results: List[DailySpendData]
-    metadata: DailySpendMetadata = Field(default_factory=DailySpendMetadata)
-
-
-class LiteLLM_DailyUserSpend(BaseModel):
-    id: str
-    user_id: str
-    date: str
-    api_key: str
-    model: str
-    model_group: Optional[str] = None
-    custom_llm_provider: Optional[str] = None
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    spend: float = 0.0
-    api_requests: int = 0
-
-
-class GroupedData(TypedDict):
-    metrics: SpendMetrics
-    breakdown: BreakdownMetrics
-
-
 def update_metrics(
     group_metrics: SpendMetrics, record: LiteLLM_DailyUserSpend
 ) -> SpendMetrics:
     group_metrics.spend += record.spend
     group_metrics.prompt_tokens += record.prompt_tokens
     group_metrics.completion_tokens += record.completion_tokens
+    group_metrics.cache_read_input_tokens += record.cache_read_input_tokens
+    group_metrics.cache_creation_input_tokens += record.cache_creation_input_tokens
     group_metrics.total_tokens += record.prompt_tokens + record.completion_tokens
     group_metrics.api_requests += record.api_requests
+    group_metrics.successful_requests += record.successful_requests
+    group_metrics.failed_requests += record.failed_requests
     return group_metrics
 
 
 def update_breakdown_metrics(
-    breakdown: BreakdownMetrics, record: LiteLLM_DailyUserSpend
+    breakdown: BreakdownMetrics,
+    record: LiteLLM_DailyUserSpend,
+    model_metadata: Dict[str, Dict[str, Any]],
+    provider_metadata: Dict[str, Dict[str, Any]],
+    api_key_metadata: Dict[str, Dict[str, Any]],
 ) -> BreakdownMetrics:
     """Updates breakdown metrics for a single record using the existing update_metrics function"""
 
     # Update model breakdown
     if record.model not in breakdown.models:
-        breakdown.models[record.model] = SpendMetrics()
-    breakdown.models[record.model] = update_metrics(
-        breakdown.models[record.model], record
+        breakdown.models[record.model] = MetricWithMetadata(
+            metrics=SpendMetrics(),
+            metadata=model_metadata.get(
+                record.model, {}
+            ),  # Add any model-specific metadata here
+        )
+    breakdown.models[record.model].metrics = update_metrics(
+        breakdown.models[record.model].metrics, record
     )
 
     # Update provider breakdown
     provider = record.custom_llm_provider or "unknown"
     if provider not in breakdown.providers:
-        breakdown.providers[provider] = SpendMetrics()
-    breakdown.providers[provider] = update_metrics(
-        breakdown.providers[provider], record
+        breakdown.providers[provider] = MetricWithMetadata(
+            metrics=SpendMetrics(),
+            metadata=provider_metadata.get(
+                provider, {}
+            ),  # Add any provider-specific metadata here
+        )
+    breakdown.providers[provider].metrics = update_metrics(
+        breakdown.providers[provider].metrics, record
     )
 
     # Update api key breakdown
     if record.api_key not in breakdown.api_keys:
-        breakdown.api_keys[record.api_key] = SpendMetrics()
-    breakdown.api_keys[record.api_key] = update_metrics(
-        breakdown.api_keys[record.api_key], record
+        breakdown.api_keys[record.api_key] = KeyMetricWithMetadata(
+            metrics=SpendMetrics(),
+            metadata=KeyMetadata(
+                key_alias=api_key_metadata.get(record.api_key, {}).get(
+                    "key_alias", None
+                )
+            ),  # Add any api_key-specific metadata here
+        )
+    breakdown.api_keys[record.api_key].metrics = update_metrics(
+        breakdown.api_keys[record.api_key].metrics, record
     )
 
     return breakdown
@@ -1382,7 +1347,7 @@ async def get_user_daily_activity(
         default=1, description="Page number for pagination", ge=1
     ),
     page_size: int = fastapi.Query(
-        default=50, description="Items per page", ge=1, le=100
+        default=50, description="Items per page", ge=1, le=1000
     ),
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ) -> SpendAnalyticsPaginatedResponse:
@@ -1396,6 +1361,8 @@ async def get_user_daily_activity(
     - spend
     - prompt_tokens
     - completion_tokens
+    - cache_read_input_tokens
+    - cache_creation_input_tokens
     - total_tokens
     - api_requests
     - breakdown by model, api_key, provider
@@ -1415,91 +1382,22 @@ async def get_user_daily_activity(
         )
 
     try:
-        # Build filter conditions
-        where_conditions: Dict[str, Any] = {
-            "date": {
-                "gte": start_date,
-                "lte": end_date,
-            }
-        }
+        entity_id: Optional[str] = None
+        if not _user_has_admin_view(user_api_key_dict):
+            entity_id = user_api_key_dict.user_id
 
-        if model:
-            where_conditions["model"] = model
-        if api_key:
-            where_conditions["api_key"] = api_key
-
-        # Get total count for pagination
-        total_count = await prisma_client.db.litellm_dailyuserspend.count(
-            where=where_conditions
-        )
-
-        # Fetch paginated results
-        daily_spend_data = await prisma_client.db.litellm_dailyuserspend.find_many(
-            where=where_conditions,
-            order=[
-                {"date": "desc"},
-            ],
-            skip=(page - 1) * page_size,
-            take=page_size,
-        )
-
-        # Process results
-        results = []
-        total_metrics = SpendMetrics()
-
-        # Group data by date and other dimensions
-
-        grouped_data: Dict[str, Dict[str, Any]] = {}
-        for record in daily_spend_data:
-            date_str = record.date
-            if date_str not in grouped_data:
-                grouped_data[date_str] = {
-                    "metrics": SpendMetrics(),
-                    "breakdown": BreakdownMetrics(),
-                }
-
-            # Update metrics
-            grouped_data[date_str]["metrics"] = update_metrics(
-                grouped_data[date_str]["metrics"], record
-            )
-            # Update breakdowns
-            grouped_data[date_str]["breakdown"] = update_breakdown_metrics(
-                grouped_data[date_str]["breakdown"], record
-            )
-
-            # Update total metrics
-            total_metrics.spend += record.spend
-            total_metrics.prompt_tokens += record.prompt_tokens
-            total_metrics.completion_tokens += record.completion_tokens
-            total_metrics.total_tokens += (
-                record.prompt_tokens + record.completion_tokens
-            )
-            total_metrics.api_requests += 1
-
-        # Convert grouped data to response format
-        for date_str, data in grouped_data.items():
-            results.append(
-                DailySpendData(
-                    date=datetime.strptime(date_str, "%Y-%m-%d").date(),
-                    metrics=data["metrics"],
-                    breakdown=data["breakdown"],
-                )
-            )
-
-        # Sort results by date
-        results.sort(key=lambda x: x.date, reverse=True)
-
-        return SpendAnalyticsPaginatedResponse(
-            results=results,
-            metadata=DailySpendMetadata(
-                total_spend=total_metrics.spend,
-                total_prompt_tokens=total_metrics.prompt_tokens,
-                total_completion_tokens=total_metrics.completion_tokens,
-                total_api_requests=total_metrics.api_requests,
-                page=page,
-                total_pages=-(-total_count // page_size),  # Ceiling division
-                has_more=(page * page_size) < total_count,
-            ),
+        return await get_daily_activity(
+            prisma_client=prisma_client,
+            table_name="litellm_dailyuserspend",
+            entity_id_field="user_id",
+            entity_id=entity_id,
+            entity_metadata_field=None,
+            start_date=start_date,
+            end_date=end_date,
+            model=model,
+            api_key=api_key,
+            page=page,
+            page_size=page_size,
         )
 
     except Exception as e:
